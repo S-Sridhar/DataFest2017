@@ -1,0 +1,137 @@
+---
+title: "Datafest: Targeting Expedia's Niche Travel Package Market"
+author: "Subashini Sridhar, Zainab Rizvi "
+date: "March 31, 2017"
+output: html_document
+---
+
+```{r}
+library(dplyr)
+library(rpart)
+library(rpart.plot)
+library(ggplot2)
+
+#read the data file, each observation indicates an user's interaction with the Expedia website
+clicks <- read_csv("~/Smith/DataFest2017Data/data/clicks.csv")
+```
+
+## Data Cleanup and Variable Selection 
+Retrieve the subset of data where users are booking through Expedia and choose variables that may influence the booking.
+
+1. Filter for customers who booked and have values for orig_destination_distance: is_booking == 1 and orig_destination_distance != "NULL"
+
+2. Select the following attributes: 
+  - date_time: Timestamp time, date, year in user's local time
+  - srch_ci: Check-in date specified in the customer search
+  - srch_co: Check-out date specified in the customer search
+  - is_package: 1 if the click/booking was generated as a part of a package search (i.e. a hotel combined with a flight and/or car rental), 0 otherwise
+  - srch_adult_cnt: The number of adults specified to occupy the hotel room
+  - srch_children_cnt: The number of (optional) children specified to occupy the hotel room
+  - orig_destination_distance: Physical distance between a hotel and a customer at the time of search
+  - user_location_country: Country the customer is located at the time of interaction with Expedia sites
+  - hotel_country: Country the hotel is located in
+  - hotel_id: ID of the hotel
+  - prop_is_branded: 1 if the hotel is part of a major hotel chain (Hilton, Marriott, Sheraton, etc.), 0 if it is not
+  - prop_starrating: The star rating of the hotel, from 1 to 5, in increments of 1.  A 0 indicates the property has no stars, the star rating is not known or cannot be publicized
+  - distance_band: Banded distance of a hotel from the search destination center relative to other hotels in the same destination (VC = very close, C = close, M = medium close, F = far, VF = very far).  Generally, hotels closer to the center are more desirable (but not always)
+  - hist_price_band: Banded historical purchase price of a hotel relative to other hotels in the same destination (VL = very low, L = low, M = medium, H = high, VH = very high)
+  - popularity_band: Banded hotel popularity relative to other hotels in the same destination, i.e. how often it is booked on Expedia (VL = very low, L = low, M = medium, H = high, VH = very high)
+
+3. Create variable called 'duration', indicating the duration or stay/travel in days: 
+  duration = difference in the srch_co and srch_ci in days
+  
+4. Create the variable 'dateOfBooking', indicating the date booking was made:
+  dateOfBooking = conversion of 'date_time' variable from character to date format
+
+5. Create the variable 'originDestDist', indicating distance in miles
+between a hotel and a customer at the time of search :
+  originDestDist = conversion of 'orig_destination_distance' variable to a numeric datatype
+
+6. Create the variable 'daysAhead', representing the number of days ahead of travel the customer is booking:
+  daysAhead = differnce in srch_ci and dateOfBook in days
+
+7. Create variable party_total indicating the number of people, adults and children, specificed in search:
+  party_total = srch_children_cnt + srch_adults_cnt
+
+8. Filter for Users with duration of travel of at least one or more days and book at least one day ahead of travel:
+  duration > 0 & daysAhead > 0
+
+```{r}
+bookingCond <- clicks %>%
+  filter(is_booking == 1, orig_destination_distance != "NULL") %>%
+  select(date_time, srch_ci, srch_co, is_package,srch_children_cnt, 
+         srch_adults_cnt, orig_destination_distance, user_location_country, 
+         hotel_country, hotel_id, prop_is_branded, prop_starrating, distance_band, 
+         hist_price_band, popularity_band) %>%
+  mutate(duration = as.integer(difftime(srch_co,srch_ci,units="days")), 
+         dateOfBooking = as.Date(strftime(date_time, format="%Y-%m-%d")), 
+         orginDestDist = as.numeric(orig_destination_distance), daysAhead = 
+           difftime(srch_ci, dateOfBooking, units = "days"), party_total = 
+           srch_children_cnt + srch_adults_cnt) %>%
+  arrange(desc(orginDestDist)) %>%
+  filter(duration > 0 & daysAhead > 0)
+```
+
+##Fit Classification Tree
+
+Fit classification tree to model users who make a travel package booking through Expedia as explained by their duration of travel, days ahead of time they make the booking, the distance between their origin and destination, and number of people in their party. 
+
+Response: is_package
+Explanatory: duration, daysAhead, originDestDist, party_total
+
+```{r, message=FALSE, warning=FALSE}
+classBookingTree <- rpart(is_package ~ duration + daysAhead + orginDestDist + party_total, data = bookingCond, method="class", control = rpart.control(cp = 0.001))
+rpart.plot(classBookingTree, cex = 0.5)
+```
+
+
+## Model Prediction
+```{r}
+#predict the classBookingTree model on the bookingCond dataset
+predClassBooking <- predict(classBookingTree, bookingCond, type = "class")
+
+#draw a confusion matrix to test the accuracy of the model in predicting if a customer will purchase a package or not
+table(predClassBooking, bookingCond$is_package)
+```
+
+## Subset the Customers who purchased packages and those prime for converting
+
+```{r}
+#save the predicted probabilites of booking a package for each customer, as predicted by the classification tree model, in a dataframe
+predProbPackageBooking <- data.frame(predict(classBookingTree))
+#add the predicted probability of booking a package in the bookingCond dataframe
+bookingCond[,21] <- predProbPackageBooking[,2]
+
+#subset the users that don't buy packages but are prime for converting. These customers are those with the predicted probabilies for purchasing packages equal to or greater than 0.45, but less than 0.54
+bookingCond_probNo <- bookingCond %>%
+  filter(V21 >= 0.45 & V21 < 0.54)
+
+#Subset the users with as predicted by the classification tree with probability of purchasing a package at 0.54 or greater
+bookingCond_probYes <- bookingCond %>%
+  filter(V21 >= 0.54)
+```
+
+```{r}
+#select hotel attributes from bookingCond_probYes dataset
+bookingCond_probYes <- bookingCond_probYes %>%
+  mutate(prop_is_branded = as.factor(prop_is_branded), prop_starrating = as.factor(prop_starrating), distance_band = as.factor(distance_band), hist_price_band = as.factor(hist_price_band), popularity_band = as.factor(popularity_band))
+
+#select hotel attributes from bookingCond_probNo dataset
+bookingCond_probNo <- bookingCond_probNo %>%
+  mutate(prop_is_branded = as.factor(prop_is_branded), prop_starrating = as.factor(prop_starrating), distance_band = as.factor(distance_band), hist_price_band = as.factor(hist_price_band), popularity_band = as.factor(popularity_band))
+```
+
+## Visualizing Hotel Prefrences of Customers Who Purchased Packages and Customers Prime for Conversion
+```{r}
+#hotel prefrences for customers who bought packages as grouped by property star rating and property being branded
+ggplot(bookingCond_probYes, aes(x = prop_starrating)) + geom_bar(aes(fill = prop_is_branded))
+
+#hotel prefrences for customers who are prime to converting to purchasing packages as grouped by property star rating and property being branded
+ggplot(bookingCond_probNo, aes(x = prop_starrating)) + geom_bar(aes(fill = prop_is_branded))
+
+#hotel prefrences for customers who bought packages as grouped by property star rating and property price band
+ggplot(bookingCond_probYes, aes(x = prop_starrating)) + geom_bar(aes(fill = hist_price_band))
+
+#hotel prefrences for customers who are prime to converting to purchasing packages as grouped by property star rating and property price band
+ggplot(bookingCond_probNo, aes(x = prop_starrating)) + geom_bar(aes(fill = hist_price_band))
+```
